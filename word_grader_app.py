@@ -1,118 +1,87 @@
 import streamlit as st
 import pandas as pd
-import easyocr
-import tempfile
-import os
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A4
+import pytesseract
+from PIL import Image
+from io import BytesIO
+from fpdf import FPDF
 
-# 페이지 기본 설정
-st.set_page_config(page_title="영어 단어 시험 채점기", layout="centered")
+st.set_page_config(page_title="단어 시험 채점기", layout="wide")
 
-st.title("📘 영어 단어 시험 채점 프로그램")
-st.caption("필기체 인식 + 자동 채점 + PDF 결과 저장")
+st.title("📘 단어 시험 채점 프로그램 (OCR 버전)")
 
-# 1️⃣ 정답 스프레드시트 업로드
-answer_files = st.file_uploader(
-    "정답 스프레드시트를 업로드하세요 (xlsx 여러 개 가능)", 
-    type=["xlsx"], 
-    accept_multiple_files=True
-)
+st.write("""
+이미지나 스프레드시트를 업로드하면 자동으로 단어 시험을 채점해주는 프로그램입니다.  
+- 📄 엑셀 여러 개 업로드 가능  
+- 📸 이미지(OCR)도 자동 인식 가능  
+- 📊 맞은 개수, 틀린 개수 자동 계산  
+- 📥 결과는 PDF로 다운로드 가능
+""")
 
-# 2️⃣ 학생 답안 이미지 업로드
-answer_images = st.file_uploader(
-    "학생의 필기체 답안 이미지를 업로드하세요 (jpg/png 등)", 
-    type=["jpg", "png", "jpeg"], 
-    accept_multiple_files=True
-)
+# PDF 생성 함수
+def make_pdf(results):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.add_font('Nanum', '', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', uni=True)
+    pdf.set_font('Nanum', size=14)
+    pdf.cell(200, 10, txt="단어 시험 채점 결과", ln=True, align='C')
+    pdf.ln(10)
 
-# OCR 모델 로드
-@st.cache_resource
-def load_ocr():
-    return easyocr.Reader(['en', 'ko'])
+    for name, df in results.items():
+        pdf.cell(200, 10, txt=f"[{name}] 결과", ln=True)
+        pdf.ln(5)
+        correct = (df["정답여부"] == "O").sum()
+        wrong = (df["정답여부"] == "X").sum()
+        pdf.cell(200, 10, txt=f"맞은 개수: {correct}개 / 틀린 개수: {wrong}개", ln=True)
+        pdf.ln(5)
+        for _, row in df.iterrows():
+            pdf.cell(200, 10, txt=f"{row['문제']} → {row['학생답안']} ({row['정답여부']})", ln=True)
+        pdf.ln(10)
 
-reader = load_ocr()
+    buffer = BytesIO()
+    pdf.output(buffer)
+    buffer.seek(0)
+    return buffer
 
-# 결과 저장용
-results = []
+# 업로드 구역
+uploaded_files = st.file_uploader("📂 엑셀 또는 이미지 파일을 올려주세요 (여러 개 가능)", accept_multiple_files=True)
 
-# 정답 데이터 통합
-def load_all_answers(files):
-    all_answers = []
-    for file in files:
-        df = pd.read_excel(file)
-        all_answers.append(df)
-    return pd.concat(all_answers, ignore_index=True)
+if uploaded_files:
+    results = {}
 
-if answer_files and answer_images:
-    st.info("채점 중입니다. 잠시만 기다려 주세요...")
+    for file in uploaded_files:
+        filename = file.name
+        st.subheader(f"📘 {filename}")
 
-    answers_df = load_all_answers(answer_files)
-
-    for img_file in answer_images:
-        # OCR 실행
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            tmp.write(img_file.read())
-            text = " ".join([t[1] for t in reader.readtext(tmp.name)])
-            os.remove(tmp.name)
-
-        correct = 0
-        wrong = 0
-        corrections = []
-
-        for i, row in answers_df.iterrows():
-            word = str(row["word"]).strip().lower()
-            meaning = str(row["meaning"]).strip().lower()
-
-            if word in text.lower() or meaning in text.lower():
-                correct += 1
+        if filename.endswith((".xlsx", ".csv")):
+            # 엑셀 or CSV
+            if filename.endswith(".csv"):
+                df = pd.read_csv(file)
             else:
-                wrong += 1
-                corrections.append(f"{word} → {meaning}")
+                df = pd.read_excel(file)
 
-        results.append({
-            "파일명": img_file.name,
-            "맞은 개수": correct,
-            "틀린 개수": wrong,
-            "틀린 부분 수정": corrections
-        })
+            # 컬럼 확인
+            if "문제" in df.columns and "정답" in df.columns and "학생답안" in df.columns:
+                df["정답여부"] = df.apply(lambda x: "O" if str(x["정답"]).strip().lower() == str(x["학생답안"]).strip().lower() else "X", axis=1)
+                st.dataframe(df)
+                results[filename] = df
+            else:
+                st.warning("⚠️ '문제', '정답', '학생답안' 열이 필요합니다.")
 
-    # 결과표 표시
-    results_df = pd.DataFrame(results)
-    st.subheader("📊 채점 결과")
-    st.dataframe(results_df)
+        elif filename.lower().endswith((".png", ".jpg", ".jpeg")):
+            # 이미지 (OCR 인식)
+            img = Image.open(file)
+            text = pytesseract.image_to_string(img, lang="eng+kor")
+            st.text_area("인식된 텍스트", text, height=200)
+            st.info("이 이미지는 단어시험지가 아니라면 엑셀 파일을 사용하는 게 더 정확합니다.")
+        else:
+            st.warning("지원하지 않는 파일 형식입니다.")
 
-    # PDF 다운로드 생성
-    if st.button("PDF로 결과 다운로드"):
-        pdf_path = "grading_result.pdf"
-        c = canvas.Canvas(pdf_path, pagesize=A4)
-        width, height = A4
-        y = height - 50
-        c.setFont("Helvetica", 12)
-        c.drawString(100, y, "영어 단어 시험 채점 결과")
-        y -= 30
-        for r in results:
-            c.drawString(80, y, f"파일: {r['파일명']}")
-            y -= 20
-            c.drawString(100, y, f"맞은 개수: {r['맞은 개수']}  /  틀린 개수: {r['틀린 개수']}")
-            y -= 20
-            if r['틀린 부분 수정']:
-                c.drawString(120, y, "틀린 부분:")
-                y -= 20
-                for corr in r['틀린 부분 수정']:
-                    c.drawString(140, y, corr)
-                    y -= 15
-                    if y < 100:
-                        c.showPage()
-                        y = height - 50
-        c.save()
-
-        with open(pdf_path, "rb") as f:
-            st.download_button(
-                "📄 결과 PDF 다운로드",
-                f,
-                file_name="채점결과.pdf",
-                mime="application/pdf"
-            )
-
-        os.remove(pdf_path)
+    # PDF 다운로드 버튼
+    if results:
+        pdf_data = make_pdf(results)
+        st.download_button(
+            label="📥 PDF로 결과 다운로드",
+            data=pdf_data,
+            file_name="grading_result.pdf",
+            mime="application/pdf",
+        )
